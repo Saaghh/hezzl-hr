@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:latest
+    container_name: hezzl_postgres
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    command: ['postgres', '-c', 'log_statement=all']
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  clickhouse:
+    image: yandex/clickhouse-server:latest
+    container_name: hezzl_clickhouse
+    ports:
+      - "8123:8123"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+
+  nats:
+    image: nats:latest
+    container_name: hezzl_nats
+    command: -DV
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  redis:
+    image: redis:latest
+    container_name: hezzl_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  redis-data:
