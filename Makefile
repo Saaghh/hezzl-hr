@@ -17,6 +17,9 @@ up:
 build:
 	go build -o ./bin/apiserver ./cmd/apiserver
 
-.PHONY: build tidy fmt lint serve up
+test: build up
+	go test -v ./tests
+
+.PHONY: build tidy fmt lint serve up test
 
 .DEFAULT_GOAL := lint

@@ -10,6 +10,24 @@ import (
 	"go.uber.org/zap"
 )
 
+func (p *Postgres) TruncateAllTables(ctx context.Context) error {
+	_, err := p.db.Exec(
+		ctx,
+		"TRUNCATE TABLE projects CASCADE")
+	if err != nil {
+		return fmt.Errorf("p.db.Exec(...): %w", err)
+	}
+
+	_, err = p.db.Exec(
+		ctx,
+		"TRUNCATE TABLE goods CASCADE")
+	if err != nil {
+		return fmt.Errorf("p.db.Exec(...): %w", err)
+	}
+
+	return nil
+}
+
 func (p *Postgres) CreateProject(ctx context.Context, project model.Project) (*model.Project, error) {
 	query := `
 	INSERT INTO projects (name) 
@@ -123,7 +141,11 @@ func (p *Postgres) UpdateGoods(ctx context.Context, request model.UpdateGoodsReq
 		&goods.Removed,
 		&goods.CreatedAt,
 	)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, model.ErrGoodNotFound
+	case err != nil:
 		return nil, fmt.Errorf("tx.QueryRow(...).Scan(...): %w", err)
 	}
 
@@ -181,8 +203,8 @@ func (p *Postgres) DeleteGoods(ctx context.Context, goods model.Goods) (*model.G
 	return &goods, nil
 }
 
-func (p *Postgres) GetMetaData(ctx context.Context) (*model.GetMetaData, error) {
-	var totalRecords model.GetMetaData
+func (p *Postgres) GetMetaData(ctx context.Context) (*model.ListParams, error) {
+	var totalRecords model.ListParams
 
 	query := `SELECT COALESCE(COUNT(*), 0) FROM goods`
 
@@ -211,7 +233,7 @@ func (p *Postgres) GetMetaData(ctx context.Context) (*model.GetMetaData, error) 
 	return &totalRecords, nil
 }
 
-func (p *Postgres) GetGoods(ctx context.Context, params model.GetParams) (*[]model.Goods, error) {
+func (p *Postgres) GetGoods(ctx context.Context, params model.ListParams) (*[]model.Goods, error) {
 	goods := make([]model.Goods, 0, 1)
 
 	query := `
@@ -266,6 +288,20 @@ func (p *Postgres) ReprioritizeGoods(ctx context.Context, goods model.UpdatePrio
 	}()
 
 	query := `
+	SELECT * FROM goods WHERE priority >= $1 FOR UPDATE`
+
+	rows, err := tx.Query(
+		ctx,
+		query,
+		goods.Priority,
+	)
+	rows.Close()
+
+	if err != nil {
+		return nil, fmt.Errorf("tx.Query(...): %w", err)
+	}
+
+	query = `
 	UPDATE goods
 	SET priority = $1
 	WHERE id = $2 and project_id = $3 and removed = false
@@ -292,7 +328,7 @@ func (p *Postgres) ReprioritizeGoods(ctx context.Context, goods model.UpdatePrio
 	WHERE priority > $1 and removed = false
 	RETURNING id, priority`
 
-	rows, err := tx.Query(
+	rows, err = tx.Query(
 		ctx,
 		query,
 		goods.Priority)

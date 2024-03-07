@@ -10,7 +10,9 @@ import (
 	"github.com/Saaghh/hezzl-hr/internal/logger"
 	"github.com/Saaghh/hezzl-hr/internal/model"
 	"github.com/Saaghh/hezzl-hr/internal/service"
+	"github.com/Saaghh/hezzl-hr/internal/store/nats"
 	"github.com/Saaghh/hezzl-hr/internal/store/pg"
+	"github.com/Saaghh/hezzl-hr/internal/store/rdb"
 	migrate "github.com/rubenv/sql-migrate"
 	"go.uber.org/zap"
 )
@@ -39,7 +41,14 @@ func main() {
 
 	zap.L().Info("successful postgres migration")
 
-	serviceLayer := service.New(pgStore)
+	redisCash := rdb.New(cfg)
+
+	natsPublisher, err := nats.NewPublisher()
+	if err != nil {
+		zap.L().With(zap.Error(err)).Panic("main/nats.NewPublisher()")
+	}
+
+	serviceLayer := service.New(pgStore, redisCash, natsPublisher)
 
 	_, err = serviceLayer.CreateProject(ctx, model.Project{Name: "Первая запись"})
 	if err != nil {

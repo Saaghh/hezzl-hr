@@ -3,8 +3,8 @@ package apiserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/Saaghh/hezzl-hr/internal/model"
 	"go.uber.org/zap"
@@ -14,37 +14,44 @@ type service interface {
 	CreateGoods(ctx context.Context, goods model.Goods) (*model.Goods, error)
 	UpdateGoods(ctx context.Context, request model.UpdateGoodsRequest) (*model.Goods, error)
 	DeleteGoods(ctx context.Context, goods model.Goods) (*model.Goods, error)
-	GetGoods(ctx context.Context, params model.GetParams) (*[]model.Goods, *model.GetMetaData, error)
+	GetGoods(ctx context.Context, params model.ListParams) (*model.GetListResponse, error)
 	ReprioritizeGoods(ctx context.Context, goods model.UpdatePriorityRequest) (*[]model.Goods, error)
 }
 
+type ErrorResponse struct {
+	Code    int                    `json:"code"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details"`
+}
+
 type GetListResponse struct {
-	Meta  *model.GetMetaData `json:"meta"`
-	Goods *[]model.Goods     `json:"goods"`
+	Meta  *model.ListParams `json:"meta"`
+	Goods *[]model.Goods    `json:"goods"`
+}
+
+type ReprioritizeResponse struct {
+	Priorities *[]model.Goods `json:"priorities"`
 }
 
 func (s *APIServer) createGood(w http.ResponseWriter, r *http.Request) {
 	var requestGoods model.Goods
 
-	projectID, err := strconv.ParseInt(r.URL.Query().Get("projectID"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
+	if err := json.NewDecoder(r.Body).Decode(&requestGoods); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadBody", make(map[string]any))
 
 		return
 	}
 
-	if err = json.NewDecoder(r.Body).Decode(&requestGoods); err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read body")
+	if err := model.DecodeQueryParams(*r.URL, &requestGoods); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadQuery", make(map[string]any))
 
 		return
 	}
-
-	requestGoods.ProjectID = projectID
 
 	goods, err := s.service.CreateGoods(r.Context(), requestGoods)
 	if err != nil {
 		zap.L().With(zap.Error(err)).Warn("createGood/s.service.CreateGoods(r.Context(), requestGoods)")
-		writeErrorResponse(w, http.StatusInternalServerError, "internal server error")
+		writeErrorResponse(w, http.StatusInternalServerError, 5, "errors.InternalServerError", make(map[string]any))
 
 		return
 	}
@@ -57,33 +64,35 @@ func (s *APIServer) updateGoods(w http.ResponseWriter, r *http.Request) {
 
 	err := json.NewDecoder(r.Body).Decode(&updateRequest)
 	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read body")
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadBody", make(map[string]any))
 
 		return
 	}
 
-	updateRequest.ProjectID, err = strconv.ParseInt(r.URL.Query().Get("projectId"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
-
-		return
-	}
-
-	updateRequest.ID, err = strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
+	if err = model.DecodeQueryParams(*r.URL, &updateRequest); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadQuery", make(map[string]any))
 
 		return
 	}
 
 	goods, err := s.service.UpdateGoods(r.Context(), updateRequest)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, model.ErrGoodNotFound):
+		writeErrorResponse(w, http.StatusNotFound, 3, "errors.good.notFound", make(map[string]any))
+
+		return
+	case errors.Is(err, model.ErrBlankName):
+		writeErrorResponse(w, http.StatusBadRequest, 1, "errors.good.blankName", make(map[string]any))
+
+		return
+	case err != nil:
 		zap.L().With(zap.Error(err)).Warn("updateGoods/s.service.UpdateGoods(r.Context(), updateRequest)")
-		writeErrorResponse(w, http.StatusInternalServerError, "internal server error")
+		writeErrorResponse(w, http.StatusInternalServerError, 5, "errors.InternalServerError", make(map[string]any))
 
 		return
 	}
-	// TODO update response
+
 	writeOkResponse(w, http.StatusOK, goods)
 }
 
@@ -93,24 +102,22 @@ func (s *APIServer) removeGoods(w http.ResponseWriter, r *http.Request) {
 		err   error
 	)
 
-	goods.ProjectID, err = strconv.ParseInt(r.URL.Query().Get("projectId"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
-
-		return
-	}
-
-	goods.ID, err = strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
+	if err = model.DecodeQueryParams(*r.URL, &goods); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadQuery", make(map[string]any))
 
 		return
 	}
 
 	deletedGoods, err := s.service.DeleteGoods(r.Context(), goods)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, model.ErrGoodNotFound):
+		writeErrorResponse(w, http.StatusNotFound, 3, "errors.good.notFound", make(map[string]any))
+
+		return
+	case err != nil:
 		zap.L().With(zap.Error(err)).Warn("removeGoods/s.service.DeleteGoods(r.Context(), goods)")
-		writeErrorResponse(w, http.StatusInternalServerError, "internal server error")
+		writeErrorResponse(w, http.StatusInternalServerError, 5, "errors.InternalServerError", make(map[string]any))
 
 		return
 	}
@@ -119,27 +126,23 @@ func (s *APIServer) removeGoods(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) getGoods(w http.ResponseWriter, r *http.Request) {
-	params, err := model.URLToGetParams(*r.URL)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "error getting params")
+	var params model.ListParams
+	if err := model.DecodeQueryParams(*r.URL, &params); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadQuery", make(map[string]any))
 
 		return
 	}
 
-	// TODO: compose response
-	goods, metaData, err := s.service.GetGoods(r.Context(), *params)
+	result, err := s.service.GetGoods(r.Context(), params)
 	if err != nil {
 		zap.L().With(zap.Error(err)).Warn("getGoods/s.service.GetGoods(r.Context(), *params)")
 
-		writeErrorResponse(w, http.StatusInternalServerError, "internal server error")
+		writeErrorResponse(w, http.StatusInternalServerError, 5, "errors.InternalServerError", make(map[string]any))
 
 		return
 	}
 
-	writeOkResponse(w, http.StatusOK, GetListResponse{
-		Meta:  metaData,
-		Goods: goods,
-	})
+	writeOkResponse(w, http.StatusOK, result)
 }
 
 func (s *APIServer) reprioritizeGood(w http.ResponseWriter, r *http.Request) {
@@ -150,21 +153,13 @@ func (s *APIServer) reprioritizeGood(w http.ResponseWriter, r *http.Request) {
 
 	err = json.NewDecoder(r.Body).Decode(&goods)
 	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read body")
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadBody", make(map[string]any))
 
 		return
 	}
 
-	goods.ProjectID, err = strconv.ParseInt(r.URL.Query().Get("projectId"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
-
-		return
-	}
-
-	goods.ID, err = strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-	if err != nil {
-		writeErrorResponse(w, http.StatusBadRequest, "failed to read projectID")
+	if err = model.DecodeQueryParams(*r.URL, &goods); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, 0, "error.FailedToReadQuery", make(map[string]any))
 
 		return
 	}
@@ -172,12 +167,12 @@ func (s *APIServer) reprioritizeGood(w http.ResponseWriter, r *http.Request) {
 	changedGoods, err := s.service.ReprioritizeGoods(r.Context(), goods)
 	if err != nil {
 		zap.L().With(zap.Error(err)).Warn("reprioritizeGood/s.service.ReprioritizeGoods(r.Context(), goods)")
-		writeErrorResponse(w, http.StatusInternalServerError, "internal server error")
+		writeErrorResponse(w, http.StatusInternalServerError, 5, "errors.InternalServerError", make(map[string]any))
 
 		return
 	}
 
-	writeOkResponse(w, http.StatusOK, changedGoods)
+	writeOkResponse(w, http.StatusOK, ReprioritizeResponse{Priorities: changedGoods})
 }
 
 func writeOkResponse(w http.ResponseWriter, statusCode int, data any) {
@@ -191,11 +186,17 @@ func writeOkResponse(w http.ResponseWriter, statusCode int, data any) {
 	}
 }
 
-func writeErrorResponse(w http.ResponseWriter, statusCode int, description string) {
+func writeErrorResponse(w http.ResponseWriter, statusCode int, errorCode int, message string, details map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 
-	err := json.NewEncoder(w).Encode(description)
+	response := ErrorResponse{
+		Code:    errorCode,
+		Message: message,
+		Details: details,
+	}
+
+	err := json.NewEncoder(w).Encode(response)
 	if err != nil {
 		zap.L().With(zap.Error(err)).Warn(
 			"writeErrorResponse/json.NewEncoder(w).Encode(data)")

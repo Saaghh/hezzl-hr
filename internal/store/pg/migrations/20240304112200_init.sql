@@ -17,6 +17,8 @@ CREATE TABLE goods (
     created_at timestamp with time zone default now()
 );
 
+CREATE INDEX idx_goods_name ON goods (name);
+
 -- +migrate Down
 
 DROP TABLE projects, goods CASCADE;

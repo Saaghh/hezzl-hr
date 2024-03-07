@@ -3,18 +3,24 @@ package model
 import (
 	"fmt"
 	"net/url"
-	"strconv"
 	"time"
+
+	"github.com/gorilla/schema"
 )
 
 type Goods struct {
-	ID          int64     `json:"id"`
-	ProjectID   int64     `json:"projectId"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Priority    int       `json:"priority"`
-	Removed     bool      `json:"removed"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID          int64      `json:"id" schema:"id"`
+	ProjectID   int64      `json:"projectId,omitempty" schema:"projectId"`
+	Name        string     `json:"name,omitempty"`
+	Description string     `json:"description,omitempty"`
+	Priority    int        `json:"priority,omitempty"`
+	Removed     bool       `json:"removed"`
+	CreatedAt   *time.Time `json:"createdAt,omitempty"`
+}
+
+type GoodsEvent struct {
+	Goods
+	EventTime time.Time `json:"eventTime"`
 }
 
 type Project struct {
@@ -31,40 +37,28 @@ type UpdateGoodsRequest struct {
 }
 
 type UpdatePriorityRequest struct {
-	ID        int64 `json:"id"`
+	ID        int64 `json:"id" schema:"id"`
 	ProjectID int64 `json:"projectId"`
 	Priority  int   `json:"newPriority"`
 }
 
-type GetParams struct {
-	Limit  int `json:"limit"`
-	Offset int `json:"offset"`
+type ListParams struct {
+	Limit   int `json:"limit,omitempty" schema:"limit"`
+	Offset  int `json:"offset,omitempty" schema:"offset"`
+	Total   int `json:"total,omitempty"`
+	Removed int `json:"removed,omitempty"`
 }
 
-type GetMetaData struct {
-	GetParams
-	Total   int `json:"total"`
-	Removed int `json:"removed"`
+type GetListResponse struct {
+	Meta      ListParams `json:"meta"`
+	GoodsList []Goods    `json:"goods"`
 }
 
-func URLToGetParams(url url.URL) (*GetParams, error) {
-	// TODO: make better. Check for empty params
-	var err error
-
-	params := GetParams{
-		Limit:  10,
-		Offset: 1,
-	}
-
-	params.Offset, err = strconv.Atoi(url.Query().Get("offset"))
+func DecodeQueryParams(url url.URL, target any) error {
+	err := schema.NewDecoder().Decode(target, url.Query())
 	if err != nil {
-		return nil, fmt.Errorf("strconv.Atoi(url.Query().Get(\"offset\")): %w", err)
+		return fmt.Errorf("schema.NewDecoder().Decode(target, url.Query()):%w", err)
 	}
 
-	params.Limit, err = strconv.Atoi(url.Query().Get("limit"))
-	if err != nil {
-		return nil, fmt.Errorf("strconv.Atoi(url.Query().Get(\"limit\")): %w", err)
-	}
-
-	return &params, nil
+	return nil
 }

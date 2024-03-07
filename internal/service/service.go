@@ -2,13 +2,29 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Saaghh/hezzl-hr/internal/model"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 type Service struct {
-	db store
+	db   store
+	cash cashdb
+	bl   brokerLogger
+}
+
+type cashdb interface {
+	StoreGetResponse(ctx context.Context, response model.GetListResponse) error
+	InvalidateAllData(ctx context.Context) error
+	GetListResponse(ctx context.Context, params model.ListParams) (*model.GetListResponse, error)
+}
+
+type brokerLogger interface {
+	PublishEvent(event model.GoodsEvent) error
 }
 
 type store interface {
@@ -17,14 +33,16 @@ type store interface {
 	CreateGoods(ctx context.Context, goods model.Goods) (*model.Goods, error)
 	UpdateGoods(ctx context.Context, request model.UpdateGoodsRequest) (*model.Goods, error)
 	DeleteGoods(ctx context.Context, goods model.Goods) (*model.Goods, error)
-	GetGoods(ctx context.Context, params model.GetParams) (*[]model.Goods, error)
-	GetMetaData(ctx context.Context) (*model.GetMetaData, error)
+	GetGoods(ctx context.Context, params model.ListParams) (*[]model.Goods, error)
+	GetMetaData(ctx context.Context) (*model.ListParams, error)
 	ReprioritizeGoods(ctx context.Context, goods model.UpdatePriorityRequest) (*[]model.Goods, error)
 }
 
-func New(db store) *Service {
+func New(db store, cash cashdb, bl brokerLogger) *Service {
 	return &Service{
-		db: db,
+		db:   db,
+		cash: cash,
+		bl:   bl,
 	}
 }
 
@@ -43,6 +61,10 @@ func (s *Service) CreateGoods(ctx context.Context, goods model.Goods) (*model.Go
 		return nil, fmt.Errorf("s.db.CreateGoods(ctx, goods): %w", err)
 	}
 
+	if err = s.cash.InvalidateAllData(ctx); err != nil {
+		zap.L().With(zap.Error(err)).Warn("CreateGoods/s.cash.InvalidateAllData(ctx)")
+	}
+
 	return resultGood, nil
 }
 
@@ -56,8 +78,17 @@ func (s *Service) UpdateGoods(ctx context.Context, request model.UpdateGoodsRequ
 		return nil, fmt.Errorf("s.db.UpdateGoods(ctx, request): %w", err)
 	}
 
-	// TODO: invalidate redis data
-	// TODO: clickhouse log
+	if err = s.cash.InvalidateAllData(ctx); err != nil {
+		zap.L().With(zap.Error(err)).Warn("UpdateGoods/s.cash.InvalidateAllData(ctx)")
+	}
+
+	err = s.bl.PublishEvent(model.GoodsEvent{
+		Goods:     *result,
+		EventTime: time.Now(),
+	})
+	if err != nil {
+		zap.L().With(zap.Error(err)).Warn("UpdateGoods/s.bl.PublishEvent(...)")
+	}
 
 	return result, nil
 }
@@ -68,30 +99,56 @@ func (s *Service) DeleteGoods(ctx context.Context, goods model.Goods) (*model.Go
 		return nil, fmt.Errorf("s.db.DeleteGoods(ctx, goods): %w", err)
 	}
 
-	// TODO: invalidate redis data
-	// TODO: clickhouse log
+	if err = s.cash.InvalidateAllData(ctx); err != nil {
+		zap.L().With(zap.Error(err)).Warn("DeleteGoods/s.cash.InvalidateAllData(ctx)")
+	}
+
+	err = s.bl.PublishEvent(model.GoodsEvent{
+		Goods:     *result,
+		EventTime: time.Now(),
+	})
+	if err != nil {
+		zap.L().With(zap.Error(err)).Warn("DeleteGoods/s.bl.PublishEvent(...)")
+	}
 
 	return result, nil
 }
 
-func (s *Service) GetGoods(ctx context.Context, params model.GetParams) (*[]model.Goods, *model.GetMetaData, error) {
-	// TODO: check for data in redis
+func (s *Service) GetGoods(ctx context.Context, params model.ListParams) (*model.GetListResponse, error) {
+	cashedGoods, err := s.cash.GetListResponse(ctx, params)
+
+	switch {
+	case err == nil:
+		return cashedGoods, nil
+	case errors.Is(err, redis.Nil):
+		break
+	case err != nil:
+		zap.L().With(zap.Error(err)).Warn("GetGoods/s.cash.GetListResponse(ctx, params)")
+	}
+
 	result, err := s.db.GetGoods(ctx, params)
 	if err != nil {
-		return nil, nil, fmt.Errorf("s.db.GetGoods(ctx, params): %w", err)
+		return nil, fmt.Errorf("s.db.GetGoods(ctx, params): %w", err)
 	}
 
 	metaData, err := s.db.GetMetaData(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("s.db.GetMetaData(ctx): %w", err)
+		return nil, fmt.Errorf("s.db.GetMetaData(ctx): %w", err)
 	}
 
 	metaData.Offset = params.Offset
 	metaData.Limit = params.Limit
 
-	// TODO: cash data in redis
+	listResponse := model.GetListResponse{
+		Meta:      *metaData,
+		GoodsList: *result,
+	}
 
-	return result, metaData, nil
+	if err = s.cash.StoreGetResponse(ctx, listResponse); err != nil {
+		zap.L().With(zap.Error(err)).Warn("GetGoods/s.cash.StoreGetResponse(ctx, listResponse)")
+	}
+
+	return &listResponse, nil
 }
 
 func (s *Service) ReprioritizeGoods(ctx context.Context, goods model.UpdatePriorityRequest) (*[]model.Goods, error) {
@@ -104,8 +161,19 @@ func (s *Service) ReprioritizeGoods(ctx context.Context, goods model.UpdatePrior
 		return nil, fmt.Errorf("s.db.ReprioritizeGoods(ctx, goods): %w", err)
 	}
 
-	// TODO: invalidate Redis data
-	// TODO: clickhouse log
+	if err = s.cash.InvalidateAllData(ctx); err != nil {
+		zap.L().With(zap.Error(err)).Warn("ReprioritizeGoods/s.cash.InvalidateAllData(ctx)")
+	}
+
+	for _, value := range *result {
+		err = s.bl.PublishEvent(model.GoodsEvent{
+			Goods:     value,
+			EventTime: time.Now(),
+		})
+		if err != nil {
+			zap.L().With(zap.Error(err)).Warn("ReprioritizeGoods/s.bl.PublishEvent(...)")
+		}
+	}
 
 	return result, nil
 }
